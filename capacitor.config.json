@@ -1,0 +1,9 @@
+{
+  "appId": "com.borewellmanager.app",
+  "appName": "Borewell Manager",
+  "webDir": "dist",
+  "android": { "allowMixedContent": false },
+  "plugins": {
+    "SplashScreen": { "launchShowDuration": 0 }
+  }
+}
