@@ -1,0 +1,94 @@
+rules_version = '2';
+// Borewell Services Manager — every organization's data is isolated.
+// Roles: admin (everything), office (jobs/customers/billing, no profit or settings),
+//        crew (only jobs assigned to their crew/rig, may update work fields only, no money).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function userPath(uid) { return /databases/$(database)/documents/users/$(uid); }
+    function me() { return get(userPath(request.auth.uid)).data; }
+    function member(org) {
+      return signedIn() && exists(userPath(request.auth.uid))
+        && me().orgId == org && me().get('active', true) == true;
+    }
+    function hasRole(org, roles) { return member(org) && me().role in roles; }
+    function myCrewId() { return me().get('crewId', '__none__'); }
+
+    // ---------- user profiles (login -> organization + role) ----------
+    match /users/{uid} {
+      allow get: if signedIn() && (request.auth.uid == uid
+                 || (resource != null && hasRole(resource.data.orgId, ['admin'])));
+      allow list: if signedIn() && hasRole(resource.data.orgId, ['admin']);
+
+      allow create: if signedIn() && (
+        // 1) owner registering a brand-new organization (org doc created in the same batch)
+        (request.auth.uid == uid
+          && request.resource.data.role == 'admin'
+          && !exists(/databases/$(database)/documents/orgs/$(request.resource.data.orgId))
+          && getAfter(/databases/$(database)/documents/orgs/$(request.resource.data.orgId)).data.ownerUid == request.auth.uid)
+        ||
+        // 2) admin creating a login for their own organization
+        (request.auth.uid != uid
+          && hasRole(request.resource.data.orgId, ['admin'])
+          && request.resource.data.role in ['admin', 'office', 'crew'])
+      );
+
+      // Only an admin of the same org may change a profile; nobody can move it to another org.
+      allow update: if signedIn() && request.auth.uid != uid
+        && hasRole(resource.data.orgId, ['admin'])
+        && request.resource.data.orgId == resource.data.orgId
+        && request.resource.data.role in ['admin', 'office', 'crew'];
+
+      // A user may delete their own profile when deleting their account.
+      allow delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    // ---------- organizations ----------
+    match /orgs/{org} {
+      allow get: if member(org);
+      allow create: if signedIn()
+        && request.resource.data.ownerUid == request.auth.uid
+        && !exists(userPath(request.auth.uid));          // one organization per login
+      allow update: if hasRole(org, ['admin'])
+        && request.resource.data.ownerUid == resource.data.ownerUid;
+      allow delete: if false;
+
+      match /settings/{doc} {
+        allow read: if member(org);
+        allow write: if hasRole(org, ['admin']);
+      }
+      match /customers/{id} {
+        allow read, create, update: if hasRole(org, ['admin', 'office']);
+        allow delete: if hasRole(org, ['admin']);
+      }
+      match /crew/{id} {
+        allow read: if member(org);
+        allow write: if hasRole(org, ['admin']);
+      }
+      match /jobs/{id} {
+        allow read: if hasRole(org, ['admin', 'office'])
+          || (hasRole(org, ['crew']) && myCrewId() in resource.data.get('crew', []));
+        allow create: if hasRole(org, ['admin', 'office']);
+        allow update: if hasRole(org, ['admin', 'office'])
+          || (hasRole(org, ['crew'])
+              && myCrewId() in resource.data.get('crew', [])
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+                   ['status', 'depth', 'casingFt', 'casingDia', 'waterAt', 'yield', 'motorHp', 'stages',
+                    'pipeFt', 'cableFt', 'report', 'updatedAt', 'updatedBy'])
+              && request.resource.data.status in ['Scheduled', 'In Progress', 'Completed', resource.data.status]);
+        allow delete: if hasRole(org, ['admin']);
+      }
+      match /billing/{id} {
+        allow read, create, update: if hasRole(org, ['admin', 'office']);
+        allow delete: if hasRole(org, ['admin']);
+      }
+      match /jobexp/{id} {
+        allow read, write: if hasRole(org, ['admin']);
+      }
+      match /expenses/{id} {
+        allow read, write: if hasRole(org, ['admin']);
+      }
+    }
+  }
+}
